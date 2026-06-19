@@ -16,11 +16,15 @@ function App() {
   const [myTeam, setMyTeam] = useState([]);
   const [enemyTeam, setEnemyTeam] = useState([]);
   
-  // Grid State: { id: string, x: number, y: number, pokemon: object, owner: 'me' | 'enemy' }
+  // Grid State
   const [entities, setEntities] = useState([]);
   
+  // Refs for callbacks
   const peerRef = useRef(null);
   const connRef = useRef(null);
+  const isHostRef = useRef(false);
+  const myTeamRef = useRef([]);
+  const enemyTeamRef = useRef([]);
 
   // Initialize PeerJS
   useEffect(() => {
@@ -33,6 +37,7 @@ function App() {
     peer.on('connection', (conn) => {
       // Someone connected to us (We are Host)
       setIsHost(true);
+      isHostRef.current = true;
       setupConnection(conn);
     });
 
@@ -66,6 +71,7 @@ function App() {
   const connectToPeer = () => {
     if (!targetId || targetId === peerId) return;
     setIsHost(false);
+    isHostRef.current = false;
     const conn = peerRef.current.connect(targetId);
     setupConnection(conn);
   };
@@ -74,29 +80,39 @@ function App() {
     // Fetch Pokemon
     const team = await fetchRandomTeam(1); // 1 Pokemon per player for MVP
     setMyTeam(team);
+    myTeamRef.current = team;
     
     // Send our team to the other player
     conn.send({ type: 'INIT_TEAM', team });
+
+    // Check if we already received the enemy team
+    checkAndStartGrid(conn);
   };
 
   const handleNetworkData = (data) => {
     if (data.type === 'INIT_TEAM') {
       setEnemyTeam(data.team);
-      // If we are host and received enemy team, we generate the starting grid
-      if (isHost) {
-        generateStartingGrid(myTeam, data.team);
-      }
+      enemyTeamRef.current = data.team;
+      checkAndStartGrid(connRef.current);
     } else if (data.type === 'SYNC_GRID') {
       setEntities(data.entities);
       setGameState('playing');
     } else if (data.type === 'MOVE') {
-      // Handle movement from enemy
       setEntities(data.entities);
     }
   };
 
+  const checkAndStartGrid = (conn) => {
+    // Only host generates grid when both teams are ready
+    if (isHostRef.current) {
+      if (myTeamRef.current.length > 0 && enemyTeamRef.current.length > 0) {
+        generateStartingGrid(myTeamRef.current, enemyTeamRef.current, conn);
+      }
+    }
+  };
+
   // Generate starting positions
-  const generateStartingGrid = (hostTeam, clientTeam) => {
+  const generateStartingGrid = (hostTeam, clientTeam, conn) => {
     const newEntities = [];
     
     // Host starts on the left (x = 0)
@@ -106,7 +122,7 @@ function App() {
         x: 0,
         y: Math.floor(GRID_SIZE / 2) + index,
         pokemon: pokemon,
-        owner: isHost ? 'me' : 'enemy'
+        owner: 'me'
       });
     });
 
@@ -117,7 +133,7 @@ function App() {
         x: GRID_SIZE - 1,
         y: Math.floor(GRID_SIZE / 2) + index,
         pokemon: pokemon,
-        owner: isHost ? 'enemy' : 'me'
+        owner: 'enemy'
       });
     });
 
@@ -125,11 +141,14 @@ function App() {
     setGameState('playing');
     
     // Sync to client
-    connRef.current.send({ type: 'SYNC_GRID', entities: newEntities });
+    const flippedEntities = newEntities.map(e => ({
+      ...e,
+      owner: e.owner === 'me' ? 'enemy' : 'me'
+    }));
+    conn.send({ type: 'SYNC_GRID', entities: flippedEntities });
   };
 
   const handleCellClick = (x, y) => {
-    // MVP: Just teleport the first Pokemon we own to the clicked cell
     if (gameState !== 'playing') return;
     
     const myEntityIndex = entities.findIndex(e => e.owner === 'me');
@@ -143,9 +162,7 @@ function App() {
     
     setEntities(newEntities);
     
-    // Notify peer
     if (connRef.current) {
-      // Invert owner ownership for the other client when sending
       const flippedEntities = newEntities.map(e => ({
         ...e,
         owner: e.owner === 'me' ? 'enemy' : 'me'
@@ -154,7 +171,6 @@ function App() {
     }
   };
 
-  // Render
   if (gameState === 'lobby') {
     return (
       <div className="glass-panel lobby">
